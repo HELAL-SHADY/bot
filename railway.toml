@@ -1,0 +1,2 @@
+[deploy]
+startCommand = "python gmail_seller_bot_local_final.py"
