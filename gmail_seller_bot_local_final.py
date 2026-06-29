@@ -1,6 +1,6 @@
 import logging
-import sqlite3
 import os
+import psycopg2
 import csv
 from datetime import datetime
 from dotenv import load_dotenv
@@ -9,6 +9,7 @@ from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, ConversationHandler, ContextTypes, filters,
 )
+from psycopg2.extras import RealDictCursor
 
 load_dotenv()
 
@@ -18,79 +19,82 @@ GMAIL_REWARD = float(os.getenv("GMAIL_REWARD"))
 REQUIRED_PASSWORD = os.getenv("REQUIRED_PASSWORD")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 CHANNEL_LINK = os.getenv("CHANNEL_LINK")
-DB_FILE = os.getenv("DB_FILE")
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+def get_conn():
+    return psycopg2.connect(DATABASE_URL)
 
 (MAIN_MENU, WAITING_GMAIL, WAITING_PASSWORD, WAITING_BINANCE_UID, 
  WAITING_PAYMENT_PROOF, SUPPORT_MESSAGE) = range(6)
 
 # ==================== DATABASE ====================
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_conn()
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY, username TEXT,
+        user_id BIGINT PRIMARY KEY, username TEXT,
         balance REAL DEFAULT 0.0, total_sold INTEGER DEFAULT 0,
         created_at TEXT, state TEXT DEFAULT 'idle')''')
     c.execute('''CREATE TABLE IF NOT EXISTS gmail_submissions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER,
+        id SERIAL PRIMARY KEY, user_id BIGINT,
         gmail TEXT, password TEXT, status TEXT DEFAULT 'pending', created_at TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS withdrawals (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER,
+        id SERIAL PRIMARY KEY, user_id BIGINT,
         amount REAL, binance_uid TEXT, status TEXT DEFAULT 'pending',
         admin_accepted INTEGER DEFAULT 0, admin_paid INTEGER DEFAULT 0,
         payment_proof TEXT, created_at TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS support_tickets (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER,
+        id SERIAL PRIMARY KEY, user_id BIGINT,
         username TEXT, message TEXT, status TEXT DEFAULT 'open', created_at TEXT)''')
     conn.commit()
     conn.close()
 
 def get_user(user_id):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_conn()
     c = conn.cursor()
-    c.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+    c.execute("SELECT * FROM users WHERE user_id = %s", (user_id,))
     user = c.fetchone()
     if not user:
-        c.execute("INSERT INTO users (user_id, balance, total_sold, created_at, state) VALUES (?, ?, ?, ?, ?)",
+        c.execute("INSERT INTO users (user_id, balance, total_sold, created_at, state) VALUES (%s, %s, %s, %s, %s)",
                   (user_id, 0.0, 0, datetime.now().isoformat(), 'idle'))
         conn.commit()
-        c.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+        c.execute("SELECT * FROM users WHERE user_id = %s", (user_id,))
         user = c.fetchone()
     conn.close()
     return user
 
 def update_balance(user_id, amount):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_conn()
     c = conn.cursor()
-    c.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
+    c.execute("UPDATE users SET balance = balance + %s WHERE user_id = %s", (amount, user_id))
     conn.commit()
     conn.close()
 
 def deduct_balance(user_id, amount):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_conn()
     c = conn.cursor()
-    c.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (amount, user_id))
+    c.execute("UPDATE users SET balance = balance - %s WHERE user_id = %s", (amount, user_id))
     conn.commit()
     conn.close()
 
 def increment_sold(user_id):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_conn()
     c = conn.cursor()
-    c.execute("UPDATE users SET total_sold = total_sold + 1 WHERE user_id = ?", (user_id,))
+    c.execute("UPDATE users SET total_sold = total_sold + 1 WHERE user_id = %s", (user_id,))
     conn.commit()
     conn.close()
 
 def set_user_state(user_id, state):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_conn()
     c = conn.cursor()
-    c.execute("UPDATE users SET state = ? WHERE user_id = ?", (state, user_id))
+    c.execute("UPDATE users SET state = %s WHERE user_id = %s", (state, user_id))
     conn.commit()
     conn.close()
 
 def save_gmail_submission(user_id, gmail, password):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_conn()
     c = conn.cursor()
-    c.execute("INSERT INTO gmail_submissions (user_id, gmail, password, status, created_at) VALUES (?, ?, ?, ?, ?)",
+    c.execute("INSERT INTO gmail_submissions (user_id, gmail, password, status, created_at) VALUES (%s, %s, %s, %s, %s)",
               (user_id, gmail, password, 'pending', datetime.now().isoformat()))
     sid = c.lastrowid
     conn.commit()
@@ -98,17 +102,17 @@ def save_gmail_submission(user_id, gmail, password):
     return sid
 
 def is_gmail_duplicate(gmail):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_conn()
     c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM gmail_submissions WHERE gmail = ?", (gmail,))
+    c.execute("SELECT COUNT(*) FROM gmail_submissions WHERE gmail = %s", (gmail,))
     count = c.fetchone()[0]
     conn.close()
     return count > 0
 
 def save_withdrawal(user_id, amount, binance_uid):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_conn()
     c = conn.cursor()
-    c.execute("INSERT INTO withdrawals (user_id, amount, binance_uid, status, created_at) VALUES (?, ?, ?, ?, ?)",
+    c.execute("INSERT INTO withdrawals (user_id, amount, binance_uid, status, created_at) VALUES (%s, %s, %s, %s, %s)",
               (user_id, amount, binance_uid, 'pending', datetime.now().isoformat()))
     wid = c.lastrowid
     conn.commit()
@@ -116,38 +120,38 @@ def save_withdrawal(user_id, amount, binance_uid):
     return wid
 
 def get_withdrawal(wid):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_conn()
     c = conn.cursor()
-    c.execute("SELECT * FROM withdrawals WHERE id=?", (wid,))
+    c.execute("SELECT * FROM withdrawals WHERE id=%s", (wid,))
     result = c.fetchone()
     conn.close()
     return result
 
 def accept_withdrawal(wid):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_conn()
     c = conn.cursor()
-    c.execute("UPDATE withdrawals SET admin_accepted=1 WHERE id=?", (wid,))
+    c.execute("UPDATE withdrawals SET admin_accepted=1 WHERE id=%s", (wid,))
     conn.commit()
     conn.close()
 
 def save_payment_proof(wid, photo_file_id):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_conn()
     c = conn.cursor()
-    c.execute("UPDATE withdrawals SET payment_proof=? WHERE id=?", (photo_file_id, wid))
+    c.execute("UPDATE withdrawals SET payment_proof=? WHERE id=%s", (photo_file_id, wid))
     conn.commit()
     conn.close()
 
 def mark_withdrawal_paid(wid):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_conn()
     c = conn.cursor()
-    c.execute("UPDATE withdrawals SET admin_paid=1, status='completed' WHERE id=?", (wid,))
+    c.execute("UPDATE withdrawals SET admin_paid=1, status='completed' WHERE id=%s", (wid,))
     conn.commit()
     conn.close()
 
 def save_support_ticket(user_id, username, message):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_conn()
     c = conn.cursor()
-    c.execute("INSERT INTO support_tickets (user_id, username, message, created_at) VALUES (?, ?, ?, ?)",
+    c.execute("INSERT INTO support_tickets (user_id, username, message, created_at) VALUES (%s, %s, %s, %s)",
               (user_id, username, message, datetime.now().isoformat()))
     tid = c.lastrowid
     conn.commit()
@@ -155,22 +159,22 @@ def save_support_ticket(user_id, username, message):
     return tid
 
 def get_support_ticket(tid):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_conn()
     c = conn.cursor()
-    c.execute("SELECT * FROM support_tickets WHERE id=?", (tid,))
+    c.execute("SELECT * FROM support_tickets WHERE id=%s", (tid,))
     result = c.fetchone()
     conn.close()
     return result
 
 def close_support_ticket(tid):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_conn()
     c = conn.cursor()
-    c.execute("UPDATE support_tickets SET status='closed' WHERE id=?", (tid,))
+    c.execute("UPDATE support_tickets SET status='closed' WHERE id=%s", (tid,))
     conn.commit()
     conn.close()
 
 def get_leaderboard():
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_conn()
     c = conn.cursor()
     c.execute("SELECT user_id, username, total_sold, balance FROM users ORDER BY total_sold DESC LIMIT 10")
     leaders = c.fetchall()
@@ -178,7 +182,7 @@ def get_leaderboard():
     return leaders
 
 def get_user_rank(user_id):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_conn()
     c = conn.cursor()
     c.execute("SELECT COUNT(*) + 1 FROM users WHERE total_sold > (SELECT total_sold FROM users WHERE user_id = ?)", (user_id,))
     rank = c.fetchone()[0]
@@ -187,7 +191,7 @@ def get_user_rank(user_id):
 
 # ==================== EXPORT DATA ====================
 def export_to_csv():
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_conn()
     c = conn.cursor()
 
     # Export Gmail Sales
@@ -364,7 +368,7 @@ async def admin_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sid = int(parts[1])
     target = int(parts[2])
 
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_conn()
     c = conn.cursor()
     c.execute("UPDATE gmail_submissions SET status='approved' WHERE id=?", (sid,))
     conn.commit()
@@ -391,7 +395,7 @@ async def admin_reject(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sid = int(parts[1])
     target = int(parts[2])
 
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_conn()
     c = conn.cursor()
     c.execute("UPDATE gmail_submissions SET status='rejected' WHERE id=?", (sid,))
     conn.commit()
@@ -664,7 +668,7 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("Not authorized!")
         return
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_conn()
     c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM users")
     users = c.fetchone()[0]
@@ -686,7 +690,7 @@ async def admin_tickets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("Not authorized!")
         return
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_conn()
     c = conn.cursor()
     c.execute("SELECT id, user_id, username, message FROM support_tickets WHERE status='open' ORDER BY id DESC")
     tickets = c.fetchall()
