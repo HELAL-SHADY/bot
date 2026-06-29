@@ -24,7 +24,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 def get_conn():
     return psycopg2.connect(DATABASE_URL)
 
-(MAIN_MENU, WAITING_GMAIL, WAITING_PASSWORD, WAITING_BINANCE_UID, 
+(MAIN_MENU, WAITING_GMAIL, WAITING_PASSWORD, WAITING_BINANCE_UID,
  WAITING_PAYMENT_PROOF, SUPPORT_MESSAGE) = range(6)
 
 # ==================== DATABASE ====================
@@ -51,7 +51,7 @@ def init_db():
 
 def get_user(user_id):
     conn = get_conn()
-    c = conn.cursor()
+    c = conn.cursor(cursor_factory=RealDictCursor)
     c.execute("SELECT * FROM users WHERE user_id = %s", (user_id,))
     user = c.fetchone()
     if not user:
@@ -94,9 +94,9 @@ def set_user_state(user_id, state):
 def save_gmail_submission(user_id, gmail, password):
     conn = get_conn()
     c = conn.cursor()
-    c.execute("INSERT INTO gmail_submissions (user_id, gmail, password, status, created_at) VALUES (%s, %s, %s, %s, %s)",
+    c.execute("INSERT INTO gmail_submissions (user_id, gmail, password, status, created_at) VALUES (%s, %s, %s, %s, %s) RETURNING id",
               (user_id, gmail, password, 'pending', datetime.now().isoformat()))
-    sid = c.lastrowid
+    sid = c.fetchone()[0]
     conn.commit()
     conn.close()
     return sid
@@ -112,17 +112,17 @@ def is_gmail_duplicate(gmail):
 def save_withdrawal(user_id, amount, binance_uid):
     conn = get_conn()
     c = conn.cursor()
-    c.execute("INSERT INTO withdrawals (user_id, amount, binance_uid, status, created_at) VALUES (%s, %s, %s, %s, %s)",
+    c.execute("INSERT INTO withdrawals (user_id, amount, binance_uid, status, created_at) VALUES (%s, %s, %s, %s, %s) RETURNING id",
               (user_id, amount, binance_uid, 'pending', datetime.now().isoformat()))
-    wid = c.lastrowid
+    wid = c.fetchone()[0]
     conn.commit()
     conn.close()
     return wid
 
 def get_withdrawal(wid):
     conn = get_conn()
-    c = conn.cursor()
-    c.execute("SELECT * FROM withdrawals WHERE id=%s", (wid,))
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute("SELECT * FROM withdrawals WHERE id = %s", (wid,))
     result = c.fetchone()
     conn.close()
     return result
@@ -130,38 +130,38 @@ def get_withdrawal(wid):
 def accept_withdrawal(wid):
     conn = get_conn()
     c = conn.cursor()
-    c.execute("UPDATE withdrawals SET admin_accepted=1 WHERE id=%s", (wid,))
+    c.execute("UPDATE withdrawals SET admin_accepted = 1 WHERE id = %s", (wid,))
     conn.commit()
     conn.close()
 
 def save_payment_proof(wid, photo_file_id):
     conn = get_conn()
     c = conn.cursor()
-    c.execute("UPDATE withdrawals SET payment_proof=? WHERE id=%s", (photo_file_id, wid))
+    c.execute("UPDATE withdrawals SET payment_proof = %s WHERE id = %s", (photo_file_id, wid))
     conn.commit()
     conn.close()
 
 def mark_withdrawal_paid(wid):
     conn = get_conn()
     c = conn.cursor()
-    c.execute("UPDATE withdrawals SET admin_paid=1, status='completed' WHERE id=%s", (wid,))
+    c.execute("UPDATE withdrawals SET admin_paid = 1, status = 'completed' WHERE id = %s", (wid,))
     conn.commit()
     conn.close()
 
 def save_support_ticket(user_id, username, message):
     conn = get_conn()
     c = conn.cursor()
-    c.execute("INSERT INTO support_tickets (user_id, username, message, created_at) VALUES (%s, %s, %s, %s)",
+    c.execute("INSERT INTO support_tickets (user_id, username, message, created_at) VALUES (%s, %s, %s, %s) RETURNING id",
               (user_id, username, message, datetime.now().isoformat()))
-    tid = c.lastrowid
+    tid = c.fetchone()[0]
     conn.commit()
     conn.close()
     return tid
 
 def get_support_ticket(tid):
     conn = get_conn()
-    c = conn.cursor()
-    c.execute("SELECT * FROM support_tickets WHERE id=%s", (tid,))
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute("SELECT * FROM support_tickets WHERE id = %s", (tid,))
     result = c.fetchone()
     conn.close()
     return result
@@ -169,7 +169,7 @@ def get_support_ticket(tid):
 def close_support_ticket(tid):
     conn = get_conn()
     c = conn.cursor()
-    c.execute("UPDATE support_tickets SET status='closed' WHERE id=%s", (tid,))
+    c.execute("UPDATE support_tickets SET status = 'closed' WHERE id = %s", (tid,))
     conn.commit()
     conn.close()
 
@@ -184,7 +184,7 @@ def get_leaderboard():
 def get_user_rank(user_id):
     conn = get_conn()
     c = conn.cursor()
-    c.execute("SELECT COUNT(*) + 1 FROM users WHERE total_sold > (SELECT total_sold FROM users WHERE user_id = ?)", (user_id,))
+    c.execute("SELECT COUNT(*) + 1 FROM users WHERE total_sold > (SELECT total_sold FROM users WHERE user_id = %s)", (user_id,))
     rank = c.fetchone()[0]
     conn.close()
     return rank
@@ -194,28 +194,22 @@ def export_to_csv():
     conn = get_conn()
     c = conn.cursor()
 
-    # Export Gmail Sales
     c.execute("SELECT created_at, user_id, gmail, password, status FROM gmail_submissions")
     gmail_data = c.fetchall()
-
     with open('gmail_sales.csv', 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         writer.writerow(['Date', 'User ID', 'Gmail', 'Password', 'Status'])
         writer.writerows(gmail_data)
 
-    # Export Withdrawals
     c.execute("SELECT created_at, user_id, amount, binance_uid, status FROM withdrawals")
     withdrawal_data = c.fetchall()
-
     with open('withdrawals.csv', 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         writer.writerow(['Date', 'User ID', 'Amount', 'Binance UID', 'Status'])
         writer.writerows(withdrawal_data)
 
-    # Export Users
     c.execute("SELECT user_id, username, balance, total_sold, created_at FROM users")
     users_data = c.fetchall()
-
     with open('users.csv', 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         writer.writerow(['User ID', 'Username', 'Balance', 'Total Sold', 'Created At'])
@@ -302,7 +296,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "check_balance":
         user = get_user(uid)
-        bal = user[2] if user else 0.0
+        bal = user['balance'] if user else 0.0
         rank = get_user_rank(uid)
         await query.edit_message_text(
             "Your Balance\n\nCurrent Balance: $" + "{:.2f}".format(bal) + "\nRank: #" + str(rank) + "\n\nChoose an option:",
@@ -314,7 +308,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "withdraw":
         user = get_user(uid)
-        bal = user[2] if user else 0.0
+        bal = user['balance'] if user else 0.0
         if bal < 1.0:
             await query.edit_message_text(
                 "Minimum withdrawal is $1.00\nYour balance: $" + "{:.2f}".format(bal) + "\n\nSell more Gmail accounts!",
@@ -333,15 +327,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return SUPPORT_MESSAGE
 
     elif data == "leaderboard":
+        # FIX: save current user id before loop overwrites uid
+        current_uid = uid
         leaders = get_leaderboard()
         text = "Top Sellers Leaderboard\n\n"
         medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
         for i, leader in enumerate(leaders):
-            uid, uname, sold, bal = leader
+            leader_id, uname, sold, bal = leader
             text += medals[i] + " @" + str(uname or "Unknown") + " - " + str(sold) + " sold ($" + "{:.2f}".format(bal or 0) + ")\n"
 
-        user = get_user(uid)
-        my_rank = get_user_rank(uid)
+        my_rank = get_user_rank(current_uid)
         text += "\nYour Rank: #" + str(my_rank)
 
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([
@@ -370,7 +365,7 @@ async def admin_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     conn = get_conn()
     c = conn.cursor()
-    c.execute("UPDATE gmail_submissions SET status='approved' WHERE id=?", (sid,))
+    c.execute("UPDATE gmail_submissions SET status = 'approved' WHERE id = %s", (sid,))
     conn.commit()
     conn.close()
 
@@ -397,7 +392,7 @@ async def admin_reject(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     conn = get_conn()
     c = conn.cursor()
-    c.execute("UPDATE gmail_submissions SET status='rejected' WHERE id=?", (sid,))
+    c.execute("UPDATE gmail_submissions SET status = 'rejected' WHERE id = %s", (sid,))
     conn.commit()
     conn.close()
 
@@ -424,8 +419,8 @@ async def admin_accept(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Withdrawal not found!")
         return
 
-    amount = withdrawal[2]
-    binance_uid = withdrawal[3]
+    amount = withdrawal['amount']
+    binance_uid = withdrawal['binance_uid']
     accept_withdrawal(wid)
 
     try:
@@ -485,15 +480,13 @@ async def admin_support_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def receive_support_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if uid != ADMIN_ID:
-        await update.message.reply_text("Not authorized!")
-        return
+        return  # Not admin, let other handlers process
 
     tid = context.user_data.get('replying_to_ticket')
     target_user = context.user_data.get('ticket_user_id')
 
     if not tid or not target_user:
-        await update.message.reply_text("No pending reply. Use /tickets to select a ticket.")
-        return
+        return  # Not in reply mode, let other handlers process
 
     reply_message = update.message.text.strip()
     if reply_message.lower() == "/cancel":
@@ -540,8 +533,8 @@ async def receive_payment_proof(update: Update, context: ContextTypes.DEFAULT_TY
     save_payment_proof(wid, photo_file_id)
 
     withdrawal = get_withdrawal(wid)
-    amount = withdrawal[2] if withdrawal else 0
-    binance_uid = withdrawal[3] if withdrawal else ""
+    amount = withdrawal['amount'] if withdrawal else 0
+    binance_uid = withdrawal['binance_uid'] if withdrawal else ""
 
     deduct_balance(target, amount)
     mark_withdrawal_paid(wid)
@@ -615,7 +608,7 @@ async def receive_binance_uid(update: Update, context: ContextTypes.DEFAULT_TYPE
     b_uid = update.message.text.strip()
     uname = update.effective_user.username or "Unknown"
     user = get_user(uid)
-    bal = user[2] if user else 0.0
+    bal = user['balance'] if user else 0.0
     if bal < 1.0:
         await update.message.reply_text("Balance too low.", reply_markup=main_menu_keyboard())
         return MAIN_MENU
@@ -720,14 +713,6 @@ async def admin_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text("Export failed: " + str(e))
 
-async def admin_support_reply_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle admin's support reply message if they're in reply mode"""
-    if context.user_data.get('replying_to_ticket'):
-        await receive_support_reply(update, context)
-        return ConversationHandler.END
-    # If not replying, let the conversation handler take over
-    return None
-
 # ==================== MAIN ====================
 def main():
     init_db()
@@ -740,9 +725,12 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_accept, pattern="^accept_"))
     app.add_handler(CallbackQueryHandler(admin_upload_proof, pattern="^upload_"))
     app.add_handler(CallbackQueryHandler(admin_support_reply, pattern="^reply_support_"))
-    
-    # Message handler for admin support replies (must be before conversation handler)
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_support_reply_message))
+
+    # Admin support reply handler: only intercepts if admin is in reply mode
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID),
+        receive_support_reply
+    ))
 
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
