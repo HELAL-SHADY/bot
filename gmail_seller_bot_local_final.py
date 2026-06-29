@@ -21,7 +21,7 @@ CHANNEL_LINK = os.getenv("CHANNEL_LINK")
 DB_FILE = os.getenv("DB_FILE")
 
 (MAIN_MENU, WAITING_GMAIL, WAITING_PASSWORD, WAITING_BINANCE_UID, 
- WAITING_PAYMENT_PROOF, SUPPORT_MESSAGE, WAITING_SUPPORT_REPLY) = range(7)
+ WAITING_PAYMENT_PROOF, SUPPORT_MESSAGE) = range(6)
 
 # ==================== DATABASE ====================
 def init_db():
@@ -465,30 +465,38 @@ async def admin_support_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     data = query.data
     parts = data.split("_")
-    tid = int(parts[2])
-    target = int(parts[3])
+    try:
+        tid = int(parts[2])
+        target = int(parts[3])
+    except (IndexError, ValueError):
+        await query.answer("Error parsing ticket data!", show_alert=True)
+        return
 
     context.user_data['replying_to_ticket'] = tid
     context.user_data['ticket_user_id'] = target
 
     await query.edit_message_text(
-        "Send your reply message now:")
-    return WAITING_SUPPORT_REPLY
+        "Ticket #" + str(tid) + "\n\nSend your reply message now (or /cancel to skip):")
 
 async def receive_support_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if uid != ADMIN_ID:
         await update.message.reply_text("Not authorized!")
-        return MAIN_MENU
+        return
 
     tid = context.user_data.get('replying_to_ticket')
     target_user = context.user_data.get('ticket_user_id')
 
     if not tid or not target_user:
-        await update.message.reply_text("No pending reply. Use /tickets.")
-        return MAIN_MENU
+        await update.message.reply_text("No pending reply. Use /tickets to select a ticket.")
+        return
 
     reply_message = update.message.text.strip()
+    if reply_message.lower() == "/cancel":
+        await update.message.reply_text("Cancelled. No reply sent.")
+        context.user_data.pop('replying_to_ticket', None)
+        context.user_data.pop('ticket_user_id', None)
+        return
 
     close_support_ticket(tid)
 
@@ -498,12 +506,12 @@ async def receive_support_reply(update: Update, context: ContextTypes.DEFAULT_TY
             text="Support Reply to Ticket #" + str(tid) + "\n\nAdmin Response:\n\n" + reply_message)
     except Exception as e:
         logging.error("Reply send failed: " + str(e))
+        await update.message.reply_text("Failed to send reply: " + str(e))
 
     context.user_data.pop('replying_to_ticket', None)
     context.user_data.pop('ticket_user_id', None)
 
-    await update.message.reply_text("Reply sent to user " + str(target_user) + "! Ticket closed.")
-    return MAIN_MENU
+    await update.message.reply_text("Reply sent to user " + str(target_user) + "! Ticket #" + str(tid) + " closed.")
 
 async def receive_payment_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -708,6 +716,14 @@ async def admin_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text("Export failed: " + str(e))
 
+async def admin_support_reply_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle admin's support reply message if they're in reply mode"""
+    if context.user_data.get('replying_to_ticket'):
+        await receive_support_reply(update, context)
+        return ConversationHandler.END
+    # If not replying, let the conversation handler take over
+    return None
+
 # ==================== MAIN ====================
 def main():
     init_db()
@@ -720,6 +736,9 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_accept, pattern="^accept_"))
     app.add_handler(CallbackQueryHandler(admin_upload_proof, pattern="^upload_"))
     app.add_handler(CallbackQueryHandler(admin_support_reply, pattern="^reply_support_"))
+    
+    # Message handler for admin support replies (must be before conversation handler)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_support_reply_message))
 
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
@@ -733,7 +752,6 @@ def main():
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_payment_proof)
             ],
             SUPPORT_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_support)],
-            WAITING_SUPPORT_REPLY: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_support_reply)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
