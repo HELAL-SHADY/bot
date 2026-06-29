@@ -327,7 +327,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return SUPPORT_MESSAGE
 
     elif data == "leaderboard":
-        # FIX: save current user id before loop overwrites uid
         current_uid = uid
         leaders = get_leaderboard()
         text = "Top Sellers Leaderboard\n\n"
@@ -480,13 +479,14 @@ async def admin_support_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def receive_support_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if uid != ADMIN_ID:
-        return  # Not admin, let other handlers process
+        return  # Not admin
 
     tid = context.user_data.get('replying_to_ticket')
     target_user = context.user_data.get('ticket_user_id')
 
+    # ← FIX: if not in reply mode, do nothing and let ConversationHandler handle it
     if not tid or not target_user:
-        return  # Not in reply mode, let other handlers process
+        return
 
     reply_message = update.message.text.strip()
     if reply_message.lower() == "/cancel":
@@ -720,18 +720,14 @@ def main():
     logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
     app = Application.builder().token(BOT_TOKEN).build()
 
+    # Admin callback handlers
     app.add_handler(CallbackQueryHandler(admin_approve, pattern="^approve_"))
     app.add_handler(CallbackQueryHandler(admin_reject, pattern="^reject_"))
     app.add_handler(CallbackQueryHandler(admin_accept, pattern="^accept_"))
     app.add_handler(CallbackQueryHandler(admin_upload_proof, pattern="^upload_"))
     app.add_handler(CallbackQueryHandler(admin_support_reply, pattern="^reply_support_"))
 
-    # Admin support reply handler: only intercepts if admin is in reply mode
-    app.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID),
-        receive_support_reply
-    ))
-
+    # ← FIX: ConversationHandler BEFORE admin message handler
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
@@ -748,6 +744,13 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel)],
     )
     app.add_handler(conv)
+
+    # ← FIX: Admin reply handler AFTER ConversationHandler
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID),
+        receive_support_reply
+    ))
+
     app.add_handler(CommandHandler("stats", admin_stats))
     app.add_handler(CommandHandler("tickets", admin_tickets))
     app.add_handler(CommandHandler("export", admin_export))
