@@ -1,6 +1,7 @@
 import logging
 import os
 import psycopg2
+import psycopg2.pool
 import csv
 from datetime import datetime
 from dotenv import load_dotenv
@@ -21,8 +22,15 @@ CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 CHANNEL_LINK = os.getenv("CHANNEL_LINK")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+# Initialize connection pool with 5 minimum and 20 maximum connections
+db_pool = psycopg2.pool.ThreadedConnectionPool(5, 20, DATABASE_URL)
+
 def get_conn():
-    return psycopg2.connect(DATABASE_URL)
+    return db_pool.getconn()
+
+def release_conn(conn):
+    if conn:
+        db_pool.putconn(conn)
 
 (MAIN_MENU, WAITING_GMAIL, WAITING_PASSWORD, WAITING_BINANCE_UID,
  WAITING_PAYMENT_PROOF, SUPPORT_MESSAGE) = range(6)
@@ -30,193 +38,231 @@ def get_conn():
 # ==================== DATABASE ====================
 def init_db():
     conn = get_conn()
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users (
-        user_id BIGINT PRIMARY KEY, username TEXT,
-        balance REAL DEFAULT 0.0, total_sold INTEGER DEFAULT 0,
-        created_at TEXT, state TEXT DEFAULT 'idle')''')
-    c.execute('''CREATE TABLE IF NOT EXISTS gmail_submissions (
-        id SERIAL PRIMARY KEY, user_id BIGINT,
-        gmail TEXT, password TEXT, status TEXT DEFAULT 'pending', created_at TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS withdrawals (
-        id SERIAL PRIMARY KEY, user_id BIGINT,
-        amount REAL, binance_uid TEXT, status TEXT DEFAULT 'pending',
-        admin_accepted INTEGER DEFAULT 0, admin_paid INTEGER DEFAULT 0,
-        payment_proof TEXT, created_at TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS support_tickets (
-        id SERIAL PRIMARY KEY, user_id BIGINT,
-        username TEXT, message TEXT, status TEXT DEFAULT 'open', created_at TEXT)''')
-    conn.commit()
-    conn.close()
+    try:
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS users (
+            user_id BIGINT PRIMARY KEY, username TEXT,
+            balance REAL DEFAULT 0.0, total_sold INTEGER DEFAULT 0,
+            created_at TEXT, state TEXT DEFAULT 'idle')''')
+        c.execute('''CREATE TABLE IF NOT EXISTS gmail_submissions (
+            id SERIAL PRIMARY KEY, user_id BIGINT,
+            gmail TEXT, password TEXT, status TEXT DEFAULT 'pending', created_at TEXT)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS withdrawals (
+            id SERIAL PRIMARY KEY, user_id BIGINT,
+            amount REAL, binance_uid TEXT, status TEXT DEFAULT 'pending',
+            admin_accepted INTEGER DEFAULT 0, admin_paid INTEGER DEFAULT 0,
+            payment_proof TEXT, created_at TEXT)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS support_tickets (
+            id SERIAL PRIMARY KEY, user_id BIGINT,
+            username TEXT, message TEXT, status TEXT DEFAULT 'open', created_at TEXT)''')
+        conn.commit()
+    finally:
+        release_conn(conn)
 
 def get_user(user_id):
     conn = get_conn()
-    c = conn.cursor(cursor_factory=RealDictCursor)
-    c.execute("SELECT * FROM users WHERE user_id = %s", (user_id,))
-    user = c.fetchone()
-    if not user:
-        c.execute("INSERT INTO users (user_id, balance, total_sold, created_at, state) VALUES (%s, %s, %s, %s, %s)",
-                  (user_id, 0.0, 0, datetime.now().isoformat(), 'idle'))
-        conn.commit()
+    try:
+        c = conn.cursor(cursor_factory=RealDictCursor)
         c.execute("SELECT * FROM users WHERE user_id = %s", (user_id,))
         user = c.fetchone()
-    conn.close()
-    return user
+        if not user:
+            c.execute("INSERT INTO users (user_id, balance, total_sold, created_at, state) VALUES (%s, %s, %s, %s, %s)",
+                      (user_id, 0.0, 0, datetime.now().isoformat(), 'idle'))
+            conn.commit()
+            c.execute("SELECT * FROM users WHERE user_id = %s", (user_id,))
+            user = c.fetchone()
+        return user
+    finally:
+        release_conn(conn)
 
 def update_balance(user_id, amount):
     conn = get_conn()
-    c = conn.cursor()
-    c.execute("UPDATE users SET balance = balance + %s WHERE user_id = %s", (amount, user_id))
-    conn.commit()
-    conn.close()
+    try:
+        c = conn.cursor()
+        c.execute("UPDATE users SET balance = balance + %s WHERE user_id = %s", (amount, user_id))
+        conn.commit()
+    finally:
+        release_conn(conn)
 
 def deduct_balance(user_id, amount):
     conn = get_conn()
-    c = conn.cursor()
-    c.execute("UPDATE users SET balance = balance - %s WHERE user_id = %s", (amount, user_id))
-    conn.commit()
-    conn.close()
+    try:
+        c = conn.cursor()
+        c.execute("UPDATE users SET balance = balance - %s WHERE user_id = %s", (amount, user_id))
+        conn.commit()
+    finally:
+        release_conn(conn)
 
 def increment_sold(user_id):
     conn = get_conn()
-    c = conn.cursor()
-    c.execute("UPDATE users SET total_sold = total_sold + 1 WHERE user_id = %s", (user_id,))
-    conn.commit()
-    conn.close()
+    try:
+        c = conn.cursor()
+        c.execute("UPDATE users SET total_sold = total_sold + 1 WHERE user_id = %s", (user_id,))
+        conn.commit()
+    finally:
+        release_conn(conn)
 
 def set_user_state(user_id, state):
     conn = get_conn()
-    c = conn.cursor()
-    c.execute("UPDATE users SET state = %s WHERE user_id = %s", (state, user_id))
-    conn.commit()
-    conn.close()
+    try:
+        c = conn.cursor()
+        c.execute("UPDATE users SET state = %s WHERE user_id = %s", (state, user_id))
+        conn.commit()
+    finally:
+        release_conn(conn)
 
 def save_gmail_submission(user_id, gmail, password):
     conn = get_conn()
-    c = conn.cursor()
-    c.execute("INSERT INTO gmail_submissions (user_id, gmail, password, status, created_at) VALUES (%s, %s, %s, %s, %s) RETURNING id",
-              (user_id, gmail, password, 'pending', datetime.now().isoformat()))
-    sid = c.fetchone()[0]
-    conn.commit()
-    conn.close()
-    return sid
+    try:
+        c = conn.cursor()
+        c.execute("INSERT INTO gmail_submissions (user_id, gmail, password, status, created_at) VALUES (%s, %s, %s, %s, %s) RETURNING id",
+                  (user_id, gmail, password, 'pending', datetime.now().isoformat()))
+        sid = c.fetchone()[0]
+        conn.commit()
+        return sid
+    finally:
+        release_conn(conn)
 
 def is_gmail_duplicate(gmail):
     conn = get_conn()
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM gmail_submissions WHERE gmail = %s", (gmail,))
-    count = c.fetchone()[0]
-    conn.close()
-    return count > 0
+    try:
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM gmail_submissions WHERE gmail = %s", (gmail,))
+        count = c.fetchone()[0]
+        return count > 0
+    finally:
+        release_conn(conn)
 
 def save_withdrawal(user_id, amount, binance_uid):
     conn = get_conn()
-    c = conn.cursor()
-    c.execute("INSERT INTO withdrawals (user_id, amount, binance_uid, status, created_at) VALUES (%s, %s, %s, %s, %s) RETURNING id",
-              (user_id, amount, binance_uid, 'pending', datetime.now().isoformat()))
-    wid = c.fetchone()[0]
-    conn.commit()
-    conn.close()
-    return wid
+    try:
+        c = conn.cursor()
+        c.execute("INSERT INTO withdrawals (user_id, amount, binance_uid, status, created_at) VALUES (%s, %s, %s, %s, %s) RETURNING id",
+                  (user_id, amount, binance_uid, 'pending', datetime.now().isoformat()))
+        wid = c.fetchone()[0]
+        conn.commit()
+        return wid
+    finally:
+        release_conn(conn)
 
 def get_withdrawal(wid):
     conn = get_conn()
-    c = conn.cursor(cursor_factory=RealDictCursor)
-    c.execute("SELECT * FROM withdrawals WHERE id = %s", (wid,))
-    result = c.fetchone()
-    conn.close()
-    return result
+    try:
+        c = conn.cursor(cursor_factory=RealDictCursor)
+        c.execute("SELECT * FROM withdrawals WHERE id = %s", (wid,))
+        result = c.fetchone()
+        return result
+    finally:
+        release_conn(conn)
 
 def accept_withdrawal(wid):
     conn = get_conn()
-    c = conn.cursor()
-    c.execute("UPDATE withdrawals SET admin_accepted = 1 WHERE id = %s", (wid,))
-    conn.commit()
-    conn.close()
+    try:
+        c = conn.cursor()
+        c.execute("UPDATE withdrawals SET admin_accepted = 1 WHERE id = %s", (wid,))
+        conn.commit()
+    finally:
+        release_conn(conn)
 
 def save_payment_proof(wid, photo_file_id):
     conn = get_conn()
-    c = conn.cursor()
-    c.execute("UPDATE withdrawals SET payment_proof = %s WHERE id = %s", (photo_file_id, wid))
-    conn.commit()
-    conn.close()
+    try:
+        c = conn.cursor()
+        c.execute("UPDATE withdrawals SET payment_proof = %s WHERE id = %s", (photo_file_id, wid))
+        conn.commit()
+    finally:
+        release_conn(conn)
 
 def mark_withdrawal_paid(wid):
     conn = get_conn()
-    c = conn.cursor()
-    c.execute("UPDATE withdrawals SET admin_paid = 1, status = 'completed' WHERE id = %s", (wid,))
-    conn.commit()
-    conn.close()
+    try:
+        c = conn.cursor()
+        c.execute("UPDATE withdrawals SET admin_paid = 1, status = 'completed' WHERE id = %s", (wid,))
+        conn.commit()
+    finally:
+        release_conn(conn)
 
 def save_support_ticket(user_id, username, message):
     conn = get_conn()
-    c = conn.cursor()
-    c.execute("INSERT INTO support_tickets (user_id, username, message, created_at) VALUES (%s, %s, %s, %s) RETURNING id",
-              (user_id, username, message, datetime.now().isoformat()))
-    tid = c.fetchone()[0]
-    conn.commit()
-    conn.close()
-    return tid
+    try:
+        c = conn.cursor()
+        c.execute("INSERT INTO support_tickets (user_id, username, message, created_at) VALUES (%s, %s, %s, %s) RETURNING id",
+                  (user_id, username, message, datetime.now().isoformat()))
+        tid = c.fetchone()[0]
+        conn.commit()
+        return tid
+    finally:
+        release_conn(conn)
 
 def get_support_ticket(tid):
     conn = get_conn()
-    c = conn.cursor(cursor_factory=RealDictCursor)
-    c.execute("SELECT * FROM support_tickets WHERE id = %s", (tid,))
-    result = c.fetchone()
-    conn.close()
-    return result
+    try:
+        c = conn.cursor(cursor_factory=RealDictCursor)
+        c.execute("SELECT * FROM support_tickets WHERE id = %s", (tid,))
+        result = c.fetchone()
+        return result
+    finally:
+        release_conn(conn)
 
 def close_support_ticket(tid):
     conn = get_conn()
-    c = conn.cursor()
-    c.execute("UPDATE support_tickets SET status = 'closed' WHERE id = %s", (tid,))
-    conn.commit()
-    conn.close()
+    try:
+        c = conn.cursor()
+        c.execute("UPDATE support_tickets SET status = 'closed' WHERE id = %s", (tid,))
+        conn.commit()
+    finally:
+        release_conn(conn)
 
 def get_leaderboard():
     conn = get_conn()
-    c = conn.cursor()
-    c.execute("SELECT user_id, username, total_sold, balance FROM users ORDER BY total_sold DESC LIMIT 10")
-    leaders = c.fetchall()
-    conn.close()
-    return leaders
+    try:
+        c = conn.cursor()
+        c.execute("SELECT user_id, username, total_sold, balance FROM users ORDER BY total_sold DESC LIMIT 10")
+        leaders = c.fetchall()
+        return leaders
+    finally:
+        release_conn(conn)
 
 def get_user_rank(user_id):
     conn = get_conn()
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*) + 1 FROM users WHERE total_sold > (SELECT total_sold FROM users WHERE user_id = %s)", (user_id,))
-    rank = c.fetchone()[0]
-    conn.close()
-    return rank
+    try:
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) + 1 FROM users WHERE total_sold > (SELECT total_sold FROM users WHERE user_id = %s)", (user_id,))
+        rank = c.fetchone()[0]
+        return rank
+    finally:
+        release_conn(conn)
 
 # ==================== EXPORT DATA ====================
 def export_to_csv():
     conn = get_conn()
-    c = conn.cursor()
+    try:
+        c = conn.cursor()
 
-    c.execute("SELECT created_at, user_id, gmail, password, status FROM gmail_submissions")
-    gmail_data = c.fetchall()
-    with open('gmail_sales.csv', 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(['Date', 'User ID', 'Gmail', 'Password', 'Status'])
-        writer.writerows(gmail_data)
+        c.execute("SELECT created_at, user_id, gmail, password, status FROM gmail_submissions")
+        gmail_data = c.fetchall()
+        with open('gmail_sales.csv', 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(['Date', 'User ID', 'Gmail', 'Password', 'Status'])
+            writer.writerows(gmail_data)
 
-    c.execute("SELECT created_at, user_id, amount, binance_uid, status FROM withdrawals")
-    withdrawal_data = c.fetchall()
-    with open('withdrawals.csv', 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(['Date', 'User ID', 'Amount', 'Binance UID', 'Status'])
-        writer.writerows(withdrawal_data)
+        c.execute("SELECT created_at, user_id, amount, binance_uid, status FROM withdrawals")
+        withdrawal_data = c.fetchall()
+        with open('withdrawals.csv', 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(['Date', 'User ID', 'Amount', 'Binance UID', 'Status'])
+            writer.writerows(withdrawal_data)
 
-    c.execute("SELECT user_id, username, balance, total_sold, created_at FROM users")
-    users_data = c.fetchall()
-    with open('users.csv', 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(['User ID', 'Username', 'Balance', 'Total Sold', 'Created At'])
-        writer.writerows(users_data)
+        c.execute("SELECT user_id, username, balance, total_sold, created_at FROM users")
+        users_data = c.fetchall()
+        with open('users.csv', 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(['User ID', 'Username', 'Balance', 'Total Sold', 'Created At'])
+            writer.writerows(users_data)
 
-    conn.close()
-    return ['gmail_sales.csv', 'withdrawals.csv', 'users.csv']
+        return ['gmail_sales.csv', 'withdrawals.csv', 'users.csv']
+    finally:
+        release_conn(conn)
 
 # ==================== CHANNEL CHECK ====================
 async def check_channel_membership(user_id, context):
@@ -363,10 +409,12 @@ async def admin_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target = int(parts[2])
 
     conn = get_conn()
-    c = conn.cursor()
-    c.execute("UPDATE gmail_submissions SET status = 'approved' WHERE id = %s", (sid,))
-    conn.commit()
-    conn.close()
+    try:
+        c = conn.cursor()
+        c.execute("UPDATE gmail_submissions SET status = 'approved' WHERE id = %s", (sid,))
+        conn.commit()
+    finally:
+        release_conn(conn)
 
     update_balance(target, GMAIL_REWARD)
     increment_sold(target)
@@ -390,10 +438,12 @@ async def admin_reject(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target = int(parts[2])
 
     conn = get_conn()
-    c = conn.cursor()
-    c.execute("UPDATE gmail_submissions SET status = 'rejected' WHERE id = %s", (sid,))
-    conn.commit()
-    conn.close()
+    try:
+        c = conn.cursor()
+        c.execute("UPDATE gmail_submissions SET status = 'rejected' WHERE id = %s", (sid,))
+        conn.commit()
+    finally:
+        release_conn(conn)
 
     try:
         await context.bot.send_message(chat_id=target, text="Your Gmail was rejected. Password must be aass1122")
@@ -662,20 +712,22 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Not authorized!")
         return
     conn = get_conn()
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM users")
-    users = c.fetchone()[0]
-    c.execute("SELECT COUNT(*) FROM gmail_submissions")
-    subs = c.fetchone()[0]
-    c.execute("SELECT COUNT(*) FROM gmail_submissions WHERE status='pending'")
-    pending = c.fetchone()[0]
-    c.execute("SELECT COUNT(*) FROM withdrawals")
-    wds = c.fetchone()[0]
-    c.execute("SELECT SUM(balance) FROM users")
-    total = c.fetchone()[0] or 0.0
-    c.execute("SELECT COUNT(*) FROM support_tickets WHERE status='open'")
-    tickets = c.fetchone()[0]
-    conn.close()
+    try:
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM users")
+        users = c.fetchone()[0]
+        c.execute("SELECT COUNT(*) FROM gmail_submissions")
+        subs = c.fetchone()[0]
+        c.execute("SELECT COUNT(*) FROM gmail_submissions WHERE status='pending'")
+        pending = c.fetchone()[0]
+        c.execute("SELECT COUNT(*) FROM withdrawals")
+        wds = c.fetchone()[0]
+        c.execute("SELECT SUM(balance) FROM users")
+        total = c.fetchone()[0] or 0.0
+        c.execute("SELECT COUNT(*) FROM support_tickets WHERE status='open'")
+        tickets = c.fetchone()[0]
+    finally:
+        release_conn(conn)
     await update.message.reply_text(
         "Stats\n\nUsers: " + str(users) + "\nSubmissions: " + str(subs) + "\nPending: " + str(pending) + "\nWithdrawals: " + str(wds) + "\nOpen Tickets: " + str(tickets) + "\nTotal Balance: $" + "{:.2f}".format(total))
 
@@ -684,10 +736,12 @@ async def admin_tickets(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Not authorized!")
         return
     conn = get_conn()
-    c = conn.cursor()
-    c.execute("SELECT id, user_id, username, message FROM support_tickets WHERE status='open' ORDER BY id DESC")
-    tickets = c.fetchall()
-    conn.close()
+    try:
+        c = conn.cursor()
+        c.execute("SELECT id, user_id, username, message FROM support_tickets WHERE status='open' ORDER BY id DESC")
+        tickets = c.fetchall()
+    finally:
+        release_conn(conn)
 
     if not tickets:
         await update.message.reply_text("No open tickets!")
@@ -714,12 +768,20 @@ async def admin_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Export failed: " + str(e))
 
 # ==================== MAIN ====================
+def cleanup_db():
+    """Cleanup database pool on exit"""
+    if db_pool:
+        db_pool.closeall()
+
 def main():
     init_db()
 
     logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
     app = Application.builder().token(BOT_TOKEN).build()
 
+    # Add cleanup on bot shutdown
+    app.add_error_handler(lambda update, context: None)  # Placeholder
+    
     # Admin callback handlers
     app.add_handler(CallbackQueryHandler(admin_approve, pattern="^approve_"))
     app.add_handler(CallbackQueryHandler(admin_reject, pattern="^reject_"))
@@ -756,7 +818,10 @@ def main():
     app.add_handler(CommandHandler("export", admin_export))
 
     logging.info("Bot starting...")
-    app.run_polling()
+    try:
+        app.run_polling()
+    finally:
+        cleanup_db()
 
 if __name__ == "__main__":
     main()
