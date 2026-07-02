@@ -779,9 +779,6 @@ def main():
     logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Add cleanup on bot shutdown
-    app.add_error_handler(lambda update, context: None)  # Placeholder
-    
     # Admin callback handlers
     app.add_handler(CallbackQueryHandler(admin_approve, pattern="^approve_"))
     app.add_handler(CallbackQueryHandler(admin_reject, pattern="^reject_"))
