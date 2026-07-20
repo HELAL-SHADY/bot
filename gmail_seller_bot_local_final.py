@@ -55,6 +55,10 @@ def init_db():
         c.execute('''CREATE TABLE IF NOT EXISTS support_tickets (
             id SERIAL PRIMARY KEY, user_id BIGINT,
             username TEXT, message TEXT, status TEXT DEFAULT 'open', created_at TEXT)''')
+        try:
+            c.execute("ALTER TABLE gmail_submissions ADD COLUMN IF NOT EXISTS rejection_reason TEXT")
+        except Exception as e:
+            logging.error("Failed to add column rejection_reason: " + str(e))
         conn.commit()
     finally:
         release_conn(conn)
@@ -239,11 +243,11 @@ def export_to_csv():
     try:
         c = conn.cursor()
 
-        c.execute("SELECT created_at, user_id, gmail, password, status FROM gmail_submissions")
+        c.execute("SELECT created_at, user_id, gmail, password, status, rejection_reason FROM gmail_submissions")
         gmail_data = c.fetchall()
         with open('gmail_sales.csv', 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
-            writer.writerow(['Date', 'User ID', 'Gmail', 'Password', 'Status'])
+            writer.writerow(['Date', 'User ID', 'Gmail', 'Password', 'Status', 'Rejection Reason'])
             writer.writerows(gmail_data)
 
         c.execute("SELECT created_at, user_id, amount, binance_uid, status FROM withdrawals")
@@ -287,6 +291,15 @@ def admin_approval_keyboard(sid, uid):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("Approve (+$0.20)", callback_data="approve_" + str(sid) + "_" + str(uid)),
          InlineKeyboardButton("Reject", callback_data="reject_" + str(sid) + "_" + str(uid))],
+    ])
+
+def admin_rejection_reasons_keyboard(sid, uid):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Wrong Password / كلمة مرور خاطئة (aass1122)", callback_data=f"rejreason_pwd_{sid}_{uid}")],
+        [InlineKeyboardButton("Duplicate Submission / حساب مكرر", callback_data=f"rejreason_dup_{sid}_{uid}")],
+        [InlineKeyboardButton("Invalid Gmail / الحساب لا يعمل", callback_data=f"rejreason_inv_{sid}_{uid}")],
+        [InlineKeyboardButton("Write Custom Reason / كتابة سبب مخصص...", callback_data=f"rejreason_custom_{sid}_{uid}")],
+        [InlineKeyboardButton("Cancel / تراجع", callback_data=f"rejreason_cancel_{sid}_{uid}")],
     ])
 
 def admin_support_reply_keyboard(tid, uid):
@@ -437,18 +450,71 @@ async def admin_reject(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sid = int(parts[1])
     target = int(parts[2])
 
+    await query.edit_message_text(
+        text=f"{query.message.text}\n\nSelect a rejection reason / اختر سبب الرفض:",
+        reply_markup=admin_rejection_reasons_keyboard(sid, target)
+    )
+
+async def admin_rejection_reason_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    if uid != ADMIN_ID:
+        await query.answer("Not authorized!", show_alert=True)
+        return
+
+    data = query.data
+    parts = data.split("_")
+    reason_type = parts[1]
+    sid = int(parts[2])
+    target = int(parts[3])
+
+    if reason_type == "cancel":
+        orig_text = query.message.text
+        if "Select a rejection reason" in orig_text:
+            orig_text = orig_text.split("\n\nSelect a rejection reason")[0]
+        await query.edit_message_text(
+            text=orig_text.strip(),
+            reply_markup=admin_approval_keyboard(sid, target)
+        )
+        return
+
+    if reason_type == "custom":
+        context.user_data['rejecting_submission_id'] = sid
+        context.user_data['rejecting_target_user_id'] = target
+        context.user_data['waiting_custom_rejection'] = True
+        
+        await query.edit_message_text(
+            text=f"Rejection for submission ID {sid} (User {target}):\n\nPlease send the custom rejection reason now (or send /cancel to abort):"
+        )
+        return
+
+    # Standard reasons
+    reason_text = ""
+    if reason_type == "pwd":
+        reason_text = "Wrong Password (must be aass1122) / كلمة مرور خاطئة (يجب أن تكون aass1122)"
+    elif reason_type == "dup":
+        reason_text = "Duplicate submission / حساب مكرر"
+    elif reason_type == "inv":
+        reason_text = "Invalid or closed Gmail account / حساب الجيميل مغلق أو غير صالح"
+
     conn = get_conn()
     try:
         c = conn.cursor()
-        c.execute("UPDATE gmail_submissions SET status = 'rejected' WHERE id = %s", (sid,))
+        c.execute("UPDATE gmail_submissions SET status = 'rejected', rejection_reason = %s WHERE id = %s", (reason_text, sid))
         conn.commit()
     finally:
         release_conn(conn)
 
     try:
-        await context.bot.send_message(chat_id=target, text="Your Gmail was rejected. Password must be aass1122")
-    except: pass
-    await query.edit_message_text("Rejected! User " + str(target))
+        await context.bot.send_message(
+            chat_id=target,
+            text=f"❌ Your Gmail submission was rejected.\nReason / سبب الرفض:\n{reason_text}"
+        )
+    except Exception as e:
+        logging.error(f"Failed to notify user of rejection: {e}")
+
+    await query.edit_message_text(f"Rejected! User {target}\nReason: {reason_text}")
 
 async def admin_accept(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -525,6 +591,56 @@ async def admin_support_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     await query.edit_message_text(
         "Ticket #" + str(tid) + "\n\nSend your reply message now (or /cancel to skip):")
+
+async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if uid != ADMIN_ID:
+        return
+
+    # 1. Custom rejection reason flow
+    if context.user_data.get('waiting_custom_rejection'):
+        sid = context.user_data.get('rejecting_submission_id')
+        target_user = context.user_data.get('rejecting_target_user_id')
+
+        if not sid or not target_user:
+            return
+
+        reason_text = update.message.text.strip()
+        if reason_text.lower() == "/cancel":
+            await update.message.reply_text("Cancelled rejection.")
+            context.user_data.pop('waiting_custom_rejection', None)
+            context.user_data.pop('rejecting_submission_id', None)
+            context.user_data.pop('rejecting_target_user_id', None)
+            return
+
+        conn = get_conn()
+        try:
+            c = conn.cursor()
+            c.execute("UPDATE gmail_submissions SET status = 'rejected', rejection_reason = %s WHERE id = %s", (reason_text, sid))
+            conn.commit()
+        finally:
+            release_conn(conn)
+
+        try:
+            await context.bot.send_message(
+                chat_id=target_user,
+                text=f"❌ Your Gmail submission was rejected.\nReason / سبب الرفض:\n{reason_text}"
+            )
+        except Exception as e:
+            logging.error(f"Failed to notify user of rejection: {e}")
+            await update.message.reply_text(f"Failed to notify user: {e}")
+
+        context.user_data.pop('waiting_custom_rejection', None)
+        context.user_data.pop('rejecting_submission_id', None)
+        context.user_data.pop('rejecting_target_user_id', None)
+
+        await update.message.reply_text(f"Rejected! User {target_user}\nReason: {reason_text}")
+        return
+
+    # 2. Support ticket reply flow
+    if context.user_data.get('replying_to_ticket') and context.user_data.get('ticket_user_id'):
+        await receive_support_reply(update, context)
+        return
 
 async def receive_support_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -785,6 +901,7 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_accept, pattern="^accept_"))
     app.add_handler(CallbackQueryHandler(admin_upload_proof, pattern="^upload_"))
     app.add_handler(CallbackQueryHandler(admin_support_reply, pattern="^reply_support_"))
+    app.add_handler(CallbackQueryHandler(admin_rejection_reason_callback, pattern="^rejreason_"))
 
     # ← FIX: ConversationHandler BEFORE admin message handler
     conv = ConversationHandler(
@@ -807,7 +924,7 @@ def main():
     # ← FIX: Admin reply handler AFTER ConversationHandler
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID),
-        receive_support_reply
+        admin_message_handler
     ))
 
     app.add_handler(CommandHandler("stats", admin_stats))
