@@ -33,7 +33,7 @@ def release_conn(conn):
         db_pool.putconn(conn)
 
 (MAIN_MENU, WAITING_GMAIL, WAITING_PASSWORD, WAITING_BINANCE_UID,
- WAITING_PAYMENT_PROOF, SUPPORT_MESSAGE) = range(6)
+ SUPPORT_MESSAGE) = range(5)
 
 # ==================== DATABASE ====================
 def init_db():
@@ -312,10 +312,7 @@ def admin_accept_keyboard(wid, uid):
         [InlineKeyboardButton("Accept Request", callback_data="accept_" + str(wid) + "_" + str(uid))],
     ])
 
-def admin_upload_proof_keyboard(wid, uid):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Upload Payment Proof", callback_data="upload_" + str(wid) + "_" + str(uid))],
-    ])
+# admin_upload_proof_keyboard removed
 
 # ==================== HANDLERS ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -534,40 +531,37 @@ async def admin_accept(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Withdrawal not found!")
         return
 
+    if withdrawal['status'] != 'pending':
+        await query.edit_message_text("This withdrawal has already been processed!")
+        return
+
     amount = withdrawal['amount']
     binance_uid = withdrawal['binance_uid']
+    
+    # 1. Accept withdrawal in database
     accept_withdrawal(wid)
+    # 2. Deduct balance from user
+    deduct_balance(target, amount)
+    # 3. Mark withdrawal as completed/paid
+    mark_withdrawal_paid(wid)
 
     try:
         await context.bot.send_message(
             chat_id=target,
-            text="Your withdrawal request has been ACCEPTED!\n\nAmount: $" + "{:.2f}".format(amount) + "\nBinance UID: " + str(binance_uid) + "\n\nPlease wait for payment processing.")
+            text="✅ PAYMENT COMPLETED / تم إرسال الدفعة\n\n"
+                 "Amount / المبلغ: $" + "{:.2f}".format(amount) + "\n"
+                 "Binance UID: " + str(binance_uid) + "\n\n"
+                 "Your payment has been successfully processed and deducted from your balance.\n"
+                 "تم إرسال المبلغ بنجاح وخصمه من رصيدك. شكراً لك!")
     except Exception as e:
         logging.error("Notify failed: " + str(e))
 
     await query.edit_message_text(
-        "ACCEPTED\n\nUser: " + str(target) + "\nAmount: $" + "{:.2f}".format(amount) + "\nBinance UID: " + str(binance_uid) + "\n\nAfter payment, upload proof photo:",
-        reply_markup=admin_upload_proof_keyboard(wid, target))
-
-async def admin_upload_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    uid = query.from_user.id
-    if uid != ADMIN_ID:
-        await query.answer("Not authorized!", show_alert=True)
-        return
-
-    data = query.data
-    parts = data.split("_")
-    wid = int(parts[1])
-    target = int(parts[2])
-
-    context.user_data['waiting_proof_for'] = wid
-    context.user_data['proof_target'] = target
-
-    await query.edit_message_text(
-        "Please send the payment proof photo (screenshot of Binance transfer).\n\nSend photo now or /cancel to skip:")
-    return WAITING_PAYMENT_PROOF
+        "✅ APPROVED & PAID\n\n"
+        "User: " + str(target) + "\n"
+        "Amount: $" + "{:.2f}".format(amount) + "\n"
+        "Binance UID: " + str(binance_uid) + "\n\n"
+        "Status: Completed\nBalance deducted automatically.")
 
 async def admin_support_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -676,54 +670,7 @@ async def receive_support_reply(update: Update, context: ContextTypes.DEFAULT_TY
 
     await update.message.reply_text("Reply sent to user " + str(target_user) + "! Ticket #" + str(tid) + " closed.")
 
-async def receive_payment_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    if uid != ADMIN_ID:
-        await update.message.reply_text("Not authorized!")
-        return MAIN_MENU
-
-    wid = context.user_data.get('waiting_proof_for')
-    target = context.user_data.get('proof_target')
-
-    if not wid or not target:
-        await update.message.reply_text("No pending payment proof request. Use /stats.")
-        return MAIN_MENU
-
-    if not update.message.photo:
-        await update.message.reply_text("Please send a photo (screenshot). Or /cancel to skip.")
-        return WAITING_PAYMENT_PROOF
-
-    photo = update.message.photo[-1]
-    photo_file_id = photo.file_id
-
-    save_payment_proof(wid, photo_file_id)
-
-    withdrawal = get_withdrawal(wid)
-    amount = withdrawal['amount'] if withdrawal else 0
-    binance_uid = withdrawal['binance_uid'] if withdrawal else ""
-
-    deduct_balance(target, amount)
-    mark_withdrawal_paid(wid)
-
-    try:
-        await context.bot.send_photo(
-            chat_id=target,
-            photo=photo_file_id,
-            caption="PAYMENT COMPLETED!\n\nAmount: $" + "{:.2f}".format(amount) + "\nBinance UID: " + str(binance_uid) + "\n\nPayment proof attached.\nThank you for using our service!"
-        )
-    except Exception as e:
-        logging.error("Photo send failed: " + str(e))
-        try:
-            await context.bot.send_message(
-                chat_id=target,
-                text="PAYMENT COMPLETED!\n\nAmount: $" + "{:.2f}".format(amount) + "\nBinance UID: " + str(binance_uid) + "\n\nPayment sent to your Binance account.\nThank you!")
-        except: pass
-
-    context.user_data.pop('waiting_proof_for', None)
-    context.user_data.pop('proof_target', None)
-
-    await update.message.reply_text("Payment proof sent to user " + str(target) + "! Balance deducted.")
-    return MAIN_MENU
+# receive_payment_proof removed
 
 async def receive_gmail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -817,8 +764,6 @@ async def receive_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_user_state(update.effective_user.id, 'idle')
-    context.user_data.pop('waiting_proof_for', None)
-    context.user_data.pop('proof_target', None)
     await update.message.reply_text("Cancelled.\n\nChoose:", reply_markup=main_menu_keyboard())
     return MAIN_MENU
 
@@ -899,7 +844,6 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_approve, pattern="^approve_"))
     app.add_handler(CallbackQueryHandler(admin_reject, pattern="^reject_"))
     app.add_handler(CallbackQueryHandler(admin_accept, pattern="^accept_"))
-    app.add_handler(CallbackQueryHandler(admin_upload_proof, pattern="^upload_"))
     app.add_handler(CallbackQueryHandler(admin_support_reply, pattern="^reply_support_"))
     app.add_handler(CallbackQueryHandler(admin_rejection_reason_callback, pattern="^rejreason_"))
 
@@ -911,10 +855,6 @@ def main():
             WAITING_GMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_gmail)],
             WAITING_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_password)],
             WAITING_BINANCE_UID: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_binance_uid)],
-            WAITING_PAYMENT_PROOF: [
-                MessageHandler(filters.PHOTO, receive_payment_proof),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_payment_proof)
-            ],
             SUPPORT_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_support)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
