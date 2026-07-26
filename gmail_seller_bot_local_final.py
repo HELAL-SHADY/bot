@@ -305,6 +305,8 @@ def export_to_csv():
 
 # ==================== CHANNEL CHECK ====================
 async def check_channel_membership(user_id, context):
+    if user_id == ADMIN_ID:
+        return True
     try:
         member = await context.bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
         return member.status in ['member', 'administrator', 'creator']
@@ -365,7 +367,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = user.id
 
     is_member = await check_channel_membership(uid, context)
-    if not is_member:
+    if uid != ADMIN_ID and not is_member:
         await update.message.reply_text(
             "You must join our channel to use this bot!\n\n" + CHANNEL_LINK + "\n\nAfter joining, click /start again.")
         return ConversationHandler.END
@@ -383,7 +385,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = query.from_user.id
 
     is_member = await check_channel_membership(uid, context)
-    if not is_member:
+    if uid != ADMIN_ID and not is_member:
         await query.edit_message_text(
             "You must join our channel!\n\n" + CHANNEL_LINK + "\n\nAfter joining, click /start")
         return ConversationHandler.END
