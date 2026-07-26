@@ -115,6 +115,41 @@ def set_user_state(user_id, state):
     finally:
         release_conn(conn)
 
+def set_user_balance(user_id, amount):
+    conn = get_conn()
+    try:
+        c = conn.cursor()
+        c.execute("UPDATE users SET balance = %s WHERE user_id = %s", (amount, user_id))
+        conn.commit()
+    finally:
+        release_conn(conn)
+
+def get_user_admin_details(user_id):
+    conn = get_conn()
+    try:
+        c = conn.cursor(cursor_factory=RealDictCursor)
+        c.execute("SELECT user_id, username, balance, total_sold, created_at FROM users WHERE user_id = %s", (user_id,))
+        user = c.fetchone()
+        if not user:
+            return None
+
+        c.execute("SELECT COUNT(*) FROM gmail_submissions WHERE user_id = %s", (user_id,))
+        submissions = c.fetchone()[0]
+        c.execute("SELECT COUNT(*) FROM gmail_submissions WHERE user_id = %s AND status = 'pending'", (user_id,))
+        pending = c.fetchone()[0]
+        c.execute("SELECT COUNT(*) FROM withdrawals WHERE user_id = %s", (user_id,))
+        withdrawals = c.fetchone()[0]
+        c.execute("SELECT COALESCE(SUM(amount), 0) FROM withdrawals WHERE user_id = %s AND (status = 'completed' OR admin_paid = 1)", (user_id,))
+        total_withdrawn = c.fetchone()[0] or 0.0
+
+        user['submissions'] = submissions
+        user['pending_reviews'] = pending
+        user['withdrawals'] = withdrawals
+        user['total_withdrawn'] = float(total_withdrawn)
+        return user
+    finally:
+        release_conn(conn)
+
 def save_gmail_submission(user_id, gmail, password):
     conn = get_conn()
     try:
@@ -278,13 +313,23 @@ async def check_channel_membership(user_id, context):
         return False
 
 # ==================== KEYBOARDS ====================
-def main_menu_keyboard():
-    return InlineKeyboardMarkup([
+def main_menu_keyboard(uid=None):
+    buttons = [
         [InlineKeyboardButton("Sell Gmail", callback_data="sell_gmail"),
          InlineKeyboardButton("Balance", callback_data="check_balance")],
         [InlineKeyboardButton("Withdraw", callback_data="withdraw"),
          InlineKeyboardButton("Support", callback_data="support")],
         [InlineKeyboardButton("Leaderboard", callback_data="leaderboard")],
+    ]
+    if uid == ADMIN_ID:
+        buttons.append([InlineKeyboardButton("Admin", callback_data="admin_menu")])
+    return InlineKeyboardMarkup(buttons)
+
+def admin_menu_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Search", callback_data="admin_search")],
+        [InlineKeyboardButton("Edit", callback_data="admin_edit")],
+        [InlineKeyboardButton("Back", callback_data="back_menu")],
     ])
 
 def admin_approval_keyboard(sid, uid):
@@ -329,7 +374,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_user_state(uid, 'idle')
     await update.message.reply_text(
         "Welcome " + user.first_name + "!\n\nSell Gmail accounts and earn $0.20 each!\nPassword must be: aass1122\n\nChoose an option:",
-        reply_markup=main_menu_keyboard())
+        reply_markup=main_menu_keyboard(uid))
     return MAIN_MENU
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -399,8 +444,39 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]))
         return MAIN_MENU
 
+    elif data == "admin_menu":
+        if uid != ADMIN_ID:
+            await query.answer("Not authorized!", show_alert=True)
+            return MAIN_MENU
+        await query.edit_message_text("Admin Panel\n\nChoose an action:", reply_markup=admin_menu_keyboard())
+        return MAIN_MENU
+
+    elif data == "admin_search":
+        if uid != ADMIN_ID:
+            await query.answer("Not authorized!", show_alert=True)
+            return MAIN_MENU
+        context.user_data['pending_admin_action'] = 'search'
+        context.user_data.pop('pending_admin_target_user_id', None)
+        await query.edit_message_text(
+            "Search User\n\nSend the user ID now:",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back to Menu", callback_data="back_menu")]]))
+        return MAIN_MENU
+
+    elif data == "admin_edit":
+        if uid != ADMIN_ID:
+            await query.answer("Not authorized!", show_alert=True)
+            return MAIN_MENU
+        context.user_data['pending_admin_action'] = 'edit'
+        context.user_data.pop('pending_admin_target_user_id', None)
+        await query.edit_message_text(
+            "Edit User Balance\n\nSend the user ID now:",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back to Menu", callback_data="back_menu")]]))
+        return MAIN_MENU
+
     elif data == "back_menu":
-        await query.edit_message_text("Welcome back!\n\nChoose an option:", reply_markup=main_menu_keyboard())
+        context.user_data.pop('pending_admin_action', None)
+        context.user_data.pop('pending_admin_target_user_id', None)
+        await query.edit_message_text("Welcome back!\n\nChoose an option:", reply_markup=main_menu_keyboard(uid))
         return MAIN_MENU
 
     return MAIN_MENU
@@ -586,9 +662,114 @@ async def admin_support_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.edit_message_text(
         "Ticket #" + str(tid) + "\n\nSend your reply message now (or /cancel to skip):")
 
+async def admin_edit_balance_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    if uid != ADMIN_ID:
+        await query.answer("Not authorized!", show_alert=True)
+        return
+
+    data = query.data
+    parts = data.split("_")
+    try:
+        target_id = int(parts[3])
+    except (IndexError, ValueError):
+        await query.answer("Error parsing user ID!", show_alert=True)
+        return
+
+    context.user_data['pending_admin_action'] = 'edit_balance'
+    context.user_data['pending_admin_target_user_id'] = target_id
+    await query.edit_message_text(
+        f"Balance edit for user {target_id}\n\nSend the new balance amount:")
+
 async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if uid != ADMIN_ID:
+        return
+
+    pending_action = context.user_data.get('pending_admin_action')
+
+    if pending_action == 'search':
+        raw_id = update.message.text.strip()
+        if raw_id.lower() == "/cancel":
+            context.user_data.pop('pending_admin_action', None)
+            await update.message.reply_text("Cancelled search.")
+            return
+
+        try:
+            target_id = int(raw_id)
+        except ValueError:
+            await update.message.reply_text("Please send a valid numeric user ID.")
+            return
+
+        details = get_user_admin_details(target_id)
+        if not details:
+            context.user_data.pop('pending_admin_action', None)
+            await update.message.reply_text(f"No user found with ID {target_id}.")
+            return
+
+        context.user_data.pop('pending_admin_action', None)
+        username = details.get('username') or 'Unknown'
+        link = f"tg://user?id={target_id}"
+        await update.message.reply_text(
+            f"User Details\n\n"
+            f"User ID: {details['user_id']}\n"
+            f"Username: @{username if username != 'Unknown' else 'Unknown'}\n"
+            f"Account Link: {link}\n\n"
+            f"Balance: ${details['balance']:.2f}\n"
+            f"Submitted Gmail: {details['submissions']}\n"
+            f"Pending Review: {details['pending_reviews']}\n"
+            f"Withdrawals: {details['withdrawals']}\n"
+            f"Total Withdrawn: ${details['total_withdrawn']:.2f}")
+        return
+
+    if pending_action == 'edit':
+        raw_id = update.message.text.strip()
+        if raw_id.lower() == "/cancel":
+            context.user_data.pop('pending_admin_action', None)
+            await update.message.reply_text("Cancelled.")
+            return
+
+        try:
+            target_id = int(raw_id)
+        except ValueError:
+            await update.message.reply_text("Please send a valid numeric user ID.")
+            return
+
+        context.user_data['pending_admin_target_user_id'] = target_id
+        await update.message.reply_text(
+            f"User ID {target_id} selected.\n\nPress the button below to edit the balance:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("Edit Balance", callback_data=f"admin_edit_balance_{target_id}")],
+            ]))
+        context.user_data.pop('pending_admin_action', None)
+        return
+
+    if pending_action == 'edit_balance':
+        raw_amount = update.message.text.strip()
+        if raw_amount.lower() == "/cancel":
+            context.user_data.pop('pending_admin_action', None)
+            context.user_data.pop('pending_admin_target_user_id', None)
+            await update.message.reply_text("Cancelled balance edit.")
+            return
+
+        try:
+            new_balance = float(raw_amount)
+        except ValueError:
+            await update.message.reply_text("Please send a valid balance amount.")
+            return
+
+        target_id = context.user_data.get('pending_admin_target_user_id')
+        if not target_id:
+            await update.message.reply_text("No target user selected.")
+            return
+
+        set_user_balance(target_id, new_balance)
+        context.user_data.pop('pending_admin_action', None)
+        context.user_data.pop('pending_admin_target_user_id', None)
+        await update.message.reply_text(
+            f"Balance updated successfully.\n\nUser ID: {target_id}\nNew Balance: ${new_balance:.2f}")
         return
 
     # 1. Custom rejection reason flow
@@ -846,6 +1027,7 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_accept, pattern="^accept_"))
     app.add_handler(CallbackQueryHandler(admin_support_reply, pattern="^reply_support_"))
     app.add_handler(CallbackQueryHandler(admin_rejection_reason_callback, pattern="^rejreason_"))
+    app.add_handler(CallbackQueryHandler(admin_edit_balance_button, pattern="^admin_edit_balance_"))
 
     # ← FIX: ConversationHandler BEFORE admin message handler
     conv = ConversationHandler(
