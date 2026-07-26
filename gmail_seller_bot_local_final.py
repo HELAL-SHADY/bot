@@ -33,7 +33,7 @@ def release_conn(conn):
         db_pool.putconn(conn)
 
 (MAIN_MENU, WAITING_GMAIL, WAITING_PASSWORD, WAITING_BINANCE_UID,
- SUPPORT_MESSAGE) = range(5)
+ SUPPORT_MESSAGE, ADMIN_ACTION) = range(6)
 
 # ==================== DATABASE ====================
 def init_db():
@@ -462,7 +462,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "Search User\n\nSend the user ID now:",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back to Menu", callback_data="back_menu")]]))
-        return MAIN_MENU
+        return ADMIN_ACTION
 
     elif data == "admin_edit":
         if uid != ADMIN_ID:
@@ -473,7 +473,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "Edit User Balance\n\nSend the user ID now:",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back to Menu", callback_data="back_menu")]]))
-        return MAIN_MENU
+        return ADMIN_ACTION
 
     elif data == "back_menu":
         context.user_data.pop('pending_admin_action', None)
@@ -1040,6 +1040,7 @@ def main():
             WAITING_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_password)],
             WAITING_BINANCE_UID: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_binance_uid)],
             SUPPORT_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_support)],
+            ADMIN_ACTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_message_handler)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
