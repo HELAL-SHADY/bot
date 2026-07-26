@@ -142,14 +142,15 @@ def get_user_admin_details(user_id):
         if not user:
             return None
 
-        c.execute("SELECT COUNT(*) FROM gmail_submissions WHERE user_id = %s", (user_id,))
-        submissions = c.fetchone()[0]
-        c.execute("SELECT COUNT(*) FROM gmail_submissions WHERE user_id = %s AND status = 'pending'", (user_id,))
-        pending = c.fetchone()[0]
-        c.execute("SELECT COUNT(*) FROM withdrawals WHERE user_id = %s", (user_id,))
-        withdrawals = c.fetchone()[0]
-        c.execute("SELECT COALESCE(SUM(amount), 0) FROM withdrawals WHERE user_id = %s AND (status = 'completed' OR admin_paid = 1)", (user_id,))
-        total_withdrawn = c.fetchone()[0] or 0.0
+        cr = conn.cursor()
+        cr.execute("SELECT COUNT(*) FROM gmail_submissions WHERE user_id = %s", (user_id,))
+        submissions = cr.fetchone()[0]
+        cr.execute("SELECT COUNT(*) FROM gmail_submissions WHERE user_id = %s AND status = 'pending'", (user_id,))
+        pending = cr.fetchone()[0]
+        cr.execute("SELECT COUNT(*) FROM withdrawals WHERE user_id = %s", (user_id,))
+        withdrawals = cr.fetchone()[0]
+        cr.execute("SELECT COALESCE(SUM(amount), 0) FROM withdrawals WHERE user_id = %s AND (status = 'completed' OR admin_paid = 1)", (user_id,))
+        total_withdrawn = cr.fetchone()[0] or 0.0
 
         user['submissions'] = submissions
         user['pending_reviews'] = pending
