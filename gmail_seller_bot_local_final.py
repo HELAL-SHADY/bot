@@ -124,6 +124,15 @@ def set_user_balance(user_id, amount):
     finally:
         release_conn(conn)
 
+def update_username(user_id, username):
+    conn = get_conn()
+    try:
+        c = conn.cursor()
+        c.execute("UPDATE users SET username = %s WHERE user_id = %s", (username, user_id))
+        conn.commit()
+    finally:
+        release_conn(conn)
+
 def get_user_admin_details(user_id):
     conn = get_conn()
     try:
@@ -374,6 +383,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     get_user(uid)
     set_user_state(uid, 'idle')
+    if user.username:
+        update_username(uid, user.username)
     await update.message.reply_text(
         "Welcome " + user.first_name + "!\n\nSell Gmail accounts and earn $0.20 each!\nPassword must be: aass1122\n\nChoose an option:",
         reply_markup=main_menu_keyboard(uid))
@@ -697,47 +708,55 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
         if raw_id.lower() == "/cancel":
             context.user_data.pop('pending_admin_action', None)
             await update.message.reply_text("Cancelled search.")
-            return
+            return MAIN_MENU
 
         try:
             target_id = int(raw_id)
         except ValueError:
-            await update.message.reply_text("Please send a valid numeric user ID.")
-            return
+            await update.message.reply_text("❌ Invalid ID. Please send a valid numeric user ID:")
+            return ADMIN_ACTION  # Stay so admin can retry
 
-        details = get_user_admin_details(target_id)
+        try:
+            details = get_user_admin_details(target_id)
+        except Exception as e:
+            logging.error(f"get_user_admin_details error: {e}")
+            context.user_data.pop('pending_admin_action', None)
+            await update.message.reply_text(f"❌ Database error while searching:\n{e}")
+            return MAIN_MENU
+
         if not details:
             context.user_data.pop('pending_admin_action', None)
-            await update.message.reply_text(f"No user found with ID {target_id}.")
-            return
+            await update.message.reply_text(f"❌ No user found with ID {target_id}.")
+            return MAIN_MENU
 
         context.user_data.pop('pending_admin_action', None)
         username = details.get('username') or 'Unknown'
         link = f"tg://user?id={target_id}"
         await update.message.reply_text(
-            f"User Details\n\n"
-            f"User ID: {details['user_id']}\n"
-            f"Username: @{username if username != 'Unknown' else 'Unknown'}\n"
-            f"Account Link: {link}\n\n"
-            f"Balance: ${details['balance']:.2f}\n"
-            f"Submitted Gmail: {details['submissions']}\n"
-            f"Pending Review: {details['pending_reviews']}\n"
-            f"Withdrawals: {details['withdrawals']}\n"
-            f"Total Withdrawn: ${details['total_withdrawn']:.2f}")
-        return
+            f"✅ User Details\n\n"
+            f"👤 User ID: {details['user_id']}\n"
+            f"🔗 Username: @{username}\n"
+            f"💬 Account Link: {link}\n\n"
+            f"💰 Balance: ${details['balance']:.2f}\n"
+            f"📧 Submitted Gmail: {details['submissions']}\n"
+            f"⏳ Pending Review: {details['pending_reviews']}\n"
+            f"💸 Withdrawals: {details['withdrawals']}\n"
+            f"💵 Total Withdrawn: ${details['total_withdrawn']:.2f}",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Menu", callback_data="back_menu")]]))
+        return MAIN_MENU
 
     if pending_action == 'edit':
         raw_id = update.message.text.strip()
         if raw_id.lower() == "/cancel":
             context.user_data.pop('pending_admin_action', None)
             await update.message.reply_text("Cancelled.")
-            return
+            return MAIN_MENU
 
         try:
             target_id = int(raw_id)
         except ValueError:
-            await update.message.reply_text("Please send a valid numeric user ID.")
-            return
+            await update.message.reply_text("❌ Invalid ID. Please send a valid numeric user ID:")
+            return ADMIN_ACTION  # Stay so admin can retry
 
         context.user_data['pending_admin_target_user_id'] = target_id
         await update.message.reply_text(
@@ -746,7 +765,7 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
                 [InlineKeyboardButton("Edit Balance", callback_data=f"admin_edit_balance_{target_id}")],
             ]))
         context.user_data.pop('pending_admin_action', None)
-        return
+        return MAIN_MENU
 
     if pending_action == 'edit_balance':
         raw_amount = update.message.text.strip()
@@ -754,25 +773,31 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
             context.user_data.pop('pending_admin_action', None)
             context.user_data.pop('pending_admin_target_user_id', None)
             await update.message.reply_text("Cancelled balance edit.")
-            return
+            return MAIN_MENU
 
         try:
             new_balance = float(raw_amount)
         except ValueError:
-            await update.message.reply_text("Please send a valid balance amount.")
-            return
+            await update.message.reply_text("❌ Invalid amount. Please send a valid number:")
+            return ADMIN_ACTION  # Stay so admin can retry
 
         target_id = context.user_data.get('pending_admin_target_user_id')
         if not target_id:
-            await update.message.reply_text("No target user selected.")
-            return
+            await update.message.reply_text("❌ No target user selected. Go back and try again.")
+            return MAIN_MENU
 
-        set_user_balance(target_id, new_balance)
+        try:
+            set_user_balance(target_id, new_balance)
+        except Exception as e:
+            logging.error(f"set_user_balance error: {e}")
+            await update.message.reply_text(f"❌ Database error:\n{e}")
+            return MAIN_MENU
+
         context.user_data.pop('pending_admin_action', None)
         context.user_data.pop('pending_admin_target_user_id', None)
         await update.message.reply_text(
-            f"Balance updated successfully.\n\nUser ID: {target_id}\nNew Balance: ${new_balance:.2f}")
-        return
+            f"✅ Balance updated successfully.\n\nUser ID: {target_id}\nNew Balance: ${new_balance:.2f}")
+        return MAIN_MENU
 
     # 1. Custom rejection reason flow
     if context.user_data.get('waiting_custom_rejection'):
