@@ -5,6 +5,9 @@ import psycopg2.pool
 import csv
 from datetime import datetime
 from dotenv import load_dotenv
+import openpyxl
+from openpyxl.styles import PatternFill, Font, Alignment
+from openpyxl.utils import get_column_letter
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -283,9 +286,89 @@ def get_user_rank(user_id):
         release_conn(conn)
 
 # ==================== EXPORT DATA ====================
+def export_to_excel():
+    conn = get_conn()
+    try:
+        c = conn.cursor()
+        c.execute("""
+            SELECT s.gmail, s.password, u.username, s.user_id, s.status, s.rejection_reason, s.created_at
+            FROM gmail_submissions s
+            LEFT JOIN users u ON s.user_id = u.user_id
+            ORDER BY s.id DESC
+        """)
+        gmail_rows = c.fetchall()
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Gmail Submissions"
+
+        headers = ["Gmail", "Password", "Username", "state", "Rejection Reason", "Date"]
+        ws.append(headers)
+
+        header_fill = PatternFill(start_color="000000", end_color="000000", fill_type="solid")
+        header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+
+        for col_num in range(1, len(headers) + 1):
+            cell = ws.cell(row=1, column=col_num)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+
+        approved_state_font = Font(name="Calibri", size=11, bold=True, color="00B050")
+        rejected_state_font = Font(name="Calibri", size=11, bold=True, color="FF0000")
+        pending_state_font = Font(name="Calibri", size=11, bold=True, color="D99B00")
+
+        green_cell_fill = PatternFill(start_color="D4EDDA", end_color="D4EDDA", fill_type="solid")
+        red_cell_fill = PatternFill(start_color="F8D7DA", end_color="F8D7DA", fill_type="solid")
+
+        green_gmail_font = Font(name="Calibri", size=11, bold=True, color="155724")
+        red_gmail_font = Font(name="Calibri", size=11, bold=True, color="721C24")
+
+        for row_idx, row in enumerate(gmail_rows, start=2):
+            gmail, password, username, user_id, status, rej_reason, created_at = row
+            disp_username = username if username else f"User_{user_id}"
+            st = (status or "").lower()
+
+            ws.cell(row=row_idx, column=1, value=gmail)
+            ws.cell(row=row_idx, column=2, value=password)
+            ws.cell(row=row_idx, column=3, value=disp_username)
+            ws.cell(row=row_idx, column=4, value=status)
+            ws.cell(row=row_idx, column=5, value=rej_reason or "")
+            ws.cell(row=row_idx, column=6, value=created_at or "")
+
+            gmail_cell = ws.cell(row=row_idx, column=1)
+            state_cell = ws.cell(row=row_idx, column=4)
+
+            if st == 'approved':
+                gmail_cell.fill = green_cell_fill
+                gmail_cell.font = green_gmail_font
+                state_cell.font = approved_state_font
+            elif st in ['rejected', 'reject']:
+                gmail_cell.fill = red_cell_fill
+                gmail_cell.font = red_gmail_font
+                state_cell.font = rejected_state_font
+            else:
+                state_cell.font = pending_state_font
+
+        for col in ws.columns:
+            max_len = 0
+            col_letter = get_column_letter(col[0].column)
+            for cell in col:
+                val = str(cell.value or '')
+                if len(val) > max_len:
+                    max_len = len(val)
+            ws.column_dimensions[col_letter].width = max(max_len + 4, 14)
+
+        excel_filename = "gmail_sales.xlsx"
+        wb.save(excel_filename)
+        return excel_filename
+    finally:
+        release_conn(conn)
+
 def export_to_csv():
     conn = get_conn()
     try:
+        excel_file = export_to_excel()
         c = conn.cursor()
 
         c.execute("SELECT created_at, user_id, gmail, password, status, rejection_reason FROM gmail_submissions")
@@ -309,7 +392,7 @@ def export_to_csv():
             writer.writerow(['User ID', 'Username', 'Balance', 'Total Sold', 'Created At'])
             writer.writerows(users_data)
 
-        return ['gmail_sales.csv', 'withdrawals.csv', 'users.csv']
+        return [excel_file, 'gmail_sales.csv', 'withdrawals.csv', 'users.csv']
     finally:
         release_conn(conn)
 
@@ -1033,7 +1116,7 @@ async def admin_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
         files = export_to_csv()
         for file in files:
             await update.message.reply_document(document=open(file, 'rb'))
-        await update.message.reply_text("Data exported successfully!\n\nFiles:\n- gmail_sales.csv\n- withdrawals.csv\n- users.csv")
+        await update.message.reply_text("Data exported successfully!\n\nFiles:\n- gmail_sales.xlsx (Formatted)\n- gmail_sales.csv\n- withdrawals.csv\n- users.csv")
     except Exception as e:
         await update.message.reply_text("Export failed: " + str(e))
 
