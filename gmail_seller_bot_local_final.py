@@ -1148,7 +1148,10 @@ def main():
 
     # ← FIX: ConversationHandler BEFORE admin message handler
     conv = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
+        entry_points=[
+            CommandHandler("start", start),
+            CallbackQueryHandler(button_handler),
+        ],
         states={
             MAIN_MENU: [CallbackQueryHandler(button_handler)],
             WAITING_GMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_gmail)],
@@ -1157,9 +1160,17 @@ def main():
             SUPPORT_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_support)],
             ADMIN_ACTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_message_handler)],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+            CommandHandler("start", start),
+            CallbackQueryHandler(button_handler),
+        ],
+        allow_reentry=True,
     )
     app.add_handler(conv)
+
+    # Global fallback for buttons if clicked outside active conversation state
+    app.add_handler(CallbackQueryHandler(button_handler))
 
     # ← FIX: Admin reply handler AFTER ConversationHandler
     app.add_handler(MessageHandler(
