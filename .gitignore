@@ -8,3 +8,17 @@ __pycache__/
 bot.log
 *.xlsx
 *.csv
+
+# Ignore Next.js Dashboard files from Python bot repo
+package.json
+package-lock.json
+next.config.ts
+tsconfig.json
+postcss.config.js
+tailwind.config.ts
+next-env.d.ts
+app/
+components/
+lib/
+prisma/
+types/
