@@ -1,0 +1,20 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  @apply min-h-screen bg-background text-text antialiased;
+  background-image: radial-gradient(circle at top left, rgba(79, 70, 229, 0.15), transparent 25%);
+}
+
+* {
+  @apply border-white/10;
+}
+
+::selection {
+  @apply bg-accent/40 text-white;
+}

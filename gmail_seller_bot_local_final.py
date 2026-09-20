@@ -1,4 +1,5 @@
 import logging
+import sys
 import os
 import psycopg2
 import psycopg2.pool
@@ -25,14 +26,19 @@ CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 CHANNEL_LINK = os.getenv("CHANNEL_LINK")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Initialize connection pool with 5 minimum and 20 maximum connections
-db_pool = psycopg2.pool.ThreadedConnectionPool(5, 20, DATABASE_URL)
+db_pool = None
+
+def get_db_pool():
+    global db_pool
+    if db_pool is None:
+        db_pool = psycopg2.pool.ThreadedConnectionPool(1, 10, DATABASE_URL)
+    return db_pool
 
 def get_conn():
-    return db_pool.getconn()
+    return get_db_pool().getconn()
 
 def release_conn(conn):
-    if conn:
+    if conn and db_pool:
         db_pool.putconn(conn)
 
 (MAIN_MENU, WAITING_GMAIL, WAITING_PASSWORD, WAITING_BINANCE_UID,
@@ -1129,7 +1135,7 @@ def cleanup_db():
 def main():
     init_db()
 
-    logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+    logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO, stream=sys.stdout, force=True)
     app = Application.builder().token(BOT_TOKEN).build()
 
     # Admin callback handlers
