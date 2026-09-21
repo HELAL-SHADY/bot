@@ -495,7 +495,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "sell_gmail":
         set_user_state(uid, 'waiting_gmail')
-        await query.edit_message_text("Please send your Gmail address:\n\nExample: example@gmail.com")
+        await query.edit_message_text(
+            "Please send your Gmail address:\n\nExample: example@gmail.com",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Menu", callback_data="back_menu")]])
+        )
         return WAITING_GMAIL
 
     elif data == "check_balance":
@@ -520,7 +523,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return MAIN_MENU
         set_user_state(uid, 'waiting_binance_uid')
         await query.edit_message_text(
-            "Withdrawal Request\n\nYour balance: $" + "{:.2f}".format(bal) + "\n\nPlease send your Binance UID:\nExample: 123456789")
+            "Withdrawal Request\n\nYour balance: $" + "{:.2f}".format(bal) + "\n\nPlease send your Binance UID:\nExample: 123456789",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Menu", callback_data="back_menu")]])
+        )
         return WAITING_BINANCE_UID
 
     elif data == "support":
@@ -1003,7 +1008,7 @@ async def receive_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_user_state(uid, 'idle')
 
     await update.message.reply_text(
-        "Your Gmail is under review!\n\nWait for admin approval.", reply_markup=main_menu_keyboard())
+        "Your Gmail is under review!\n\nWait for admin approval.", reply_markup=main_menu_keyboard(uid))
 
     try:
         await context.bot.send_message(
@@ -1021,7 +1026,7 @@ async def receive_binance_uid(update: Update, context: ContextTypes.DEFAULT_TYPE
     user = get_user(uid)
     bal = user['balance'] if user else 0.0
     if bal < 1.0:
-        await update.message.reply_text("Balance too low.", reply_markup=main_menu_keyboard())
+        await update.message.reply_text("Balance too low.", reply_markup=main_menu_keyboard(uid))
         return MAIN_MENU
 
     wid = save_withdrawal(uid, bal, b_uid)
@@ -1029,7 +1034,7 @@ async def receive_binance_uid(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     await update.message.reply_text(
         "Withdrawal submitted!\n\nAmount: $" + "{:.2f}".format(bal) + "\nBinance UID: " + str(b_uid) + "\n\nWait for admin approval.",
-        reply_markup=main_menu_keyboard())
+        reply_markup=main_menu_keyboard(uid))
 
     try:
         await context.bot.send_message(
@@ -1049,7 +1054,7 @@ async def receive_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_user_state(uid, 'idle')
 
     await update.message.reply_text(
-        "Support ticket sent!\n\nWe will reply soon.", reply_markup=main_menu_keyboard())
+        "Support ticket sent!\n\nWe will reply soon.", reply_markup=main_menu_keyboard(uid))
 
     try:
         await context.bot.send_message(
@@ -1061,8 +1066,9 @@ async def receive_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return MAIN_MENU
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    set_user_state(update.effective_user.id, 'idle')
-    await update.message.reply_text("Cancelled.\n\nChoose:", reply_markup=main_menu_keyboard())
+    uid = update.effective_user.id
+    set_user_state(uid, 'idle')
+    await update.message.reply_text("Cancelled.\n\nChoose:", reply_markup=main_menu_keyboard(uid))
     return MAIN_MENU
 
 # ==================== ADMIN COMMANDS ====================
@@ -1154,11 +1160,26 @@ def main():
         ],
         states={
             MAIN_MENU: [CallbackQueryHandler(button_handler)],
-            WAITING_GMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_gmail)],
-            WAITING_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_password)],
-            WAITING_BINANCE_UID: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_binance_uid)],
-            SUPPORT_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_support)],
-            ADMIN_ACTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_message_handler)],
+            WAITING_GMAIL: [
+                CallbackQueryHandler(button_handler),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_gmail)
+            ],
+            WAITING_PASSWORD: [
+                CallbackQueryHandler(button_handler),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_password)
+            ],
+            WAITING_BINANCE_UID: [
+                CallbackQueryHandler(button_handler),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_binance_uid)
+            ],
+            SUPPORT_MESSAGE: [
+                CallbackQueryHandler(button_handler),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_support)
+            ],
+            ADMIN_ACTION: [
+                CallbackQueryHandler(button_handler),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_message_handler)
+            ],
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
@@ -1166,6 +1187,7 @@ def main():
             CallbackQueryHandler(button_handler),
         ],
         allow_reentry=True,
+        per_message=False,
     )
     app.add_handler(conv)
 
